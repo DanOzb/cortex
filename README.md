@@ -10,13 +10,6 @@
 This project is in active early development.  
 The current focus is on building the **file watcher** and **indexing engine** in Rust.
 
-## Phases
-
-**Phase 1: Local indexer** 
-**Phase 2: Vector store** 
-**Phase 3: Interface** 
-**Phase 4: LLM support** 
-**Phase 5: plugins and visualizations** 
 
 
 
