@@ -2,7 +2,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Receiver};
 
 
 pub struct FileIndexer {
@@ -17,7 +17,6 @@ pub struct FileIndexer {
 impl FileIndexer {
     pub fn new(debounce_ms: u64) -> Self {
         let mut code_extensions = HashSet::new();
-        // Common code file extensions
         for ext in [
             "rs", "py", "js", "ts", "jsx", "tsx", "go", "c", "cpp", "cc", "cxx", "h", "hpp",
             "java", "kt", "scala", "cs", "php", "rb", "swift", "dart", "r", "m", "mm",
@@ -97,22 +96,17 @@ impl FileIndexer {
     }
 
     fn should_index(&mut self, path: &Path) -> bool {
-        let is_watched = if !self.watched_files.is_empty() {
-            self.watched_files.contains(path)
-        } else if !self.watched_dirs.is_empty() {
-            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
-        } else {
-            false
-        };
-
-        if !is_watched {
+        if !self.is_watched(path){
             return false;
         }
 
         if !self.is_code_file(path) {
             return false;
         }
+        self.should_debounce()
+    }
 
+    fn should_debounce(&mut self) -> bool{
         let now = Instant::now();
         if let Some(last_time) = self.last_index_time {
             if now.duration_since(last_time) < self.debounce_duration {
@@ -122,6 +116,18 @@ impl FileIndexer {
 
         self.last_index_time = Some(now);
         true
+    }
+
+    fn is_watched(&self, path: &Path) -> bool {
+        let is_watched = if !self.watched_files.is_empty() {
+            self.watched_files.contains(path)
+        } else if !self.watched_dirs.is_empty() {
+            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
+        } else {
+            false
+        };
+
+        is_watched
     }
 
     fn index_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -158,6 +164,28 @@ impl FileIndexer {
     }
 
     pub fn start_watching(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+
+        let dirs_to_watch = self.setup_dirs_to_watch();
+        let (_watcher, rx) = self.setup_watcher(&dirs_to_watch)?;
+    
+        self.print_status();
+        self.program_loop(&rx);
+
+        Ok(())
+    }
+
+    fn setup_dirs_to_watch(&self) -> HashSet<PathBuf>{
+        let mut dirs_to_watch = self.watched_dirs.clone();
+        for file_path in &self.watched_files {
+            if let Some(parent) = file_path.parent() {
+                dirs_to_watch.insert(parent.to_path_buf());
+            }
+        }
+       
+        dirs_to_watch
+    }
+
+    fn setup_watcher(&self, dirs_to_watch: &HashSet<PathBuf>) -> Result<(RecommendedWatcher, Receiver<Result<Event, notify::Error>>), Box<dyn std::error::Error>> {
         let (tx, rx) = channel();
         
         let mut watcher = RecommendedWatcher::new(
@@ -165,36 +193,19 @@ impl FileIndexer {
             Config::default().with_poll_interval(Duration::from_millis(100))
         )?;
 
-        let mut dirs_to_watch = self.watched_dirs.clone();
-        
-        for file_path in &self.watched_files {
-            if let Some(parent) = file_path.parent() {
-                dirs_to_watch.insert(parent.to_path_buf());
-            }
-        }
-
         if dirs_to_watch.is_empty() {
             return Err("No files or directories to watch".into());
         }
 
-        for dir in &dirs_to_watch {
+        for dir in dirs_to_watch {
             println!("Watching directory: {}", dir.display());
             watcher.watch(dir, RecursiveMode::Recursive)?;
         }
 
-        let file_count = self.watched_files.len();
-        let dir_count = self.watched_dirs.len();
-        
-        if file_count > 0 {
-            println!("File watcher started. Monitoring {} specific files.", file_count);
-        }
-        if dir_count > 0 {
-            println!("File watcher started. Monitoring {} directories{}.", 
-                dir_count, 
-                if self.code_files_only { " (code files only)" } else { "" }
-            );
-        }
-        
+        Ok((watcher, rx))
+    }
+
+    fn program_loop(&mut self, rx: &Receiver<Result<Event, notify::Error>>){
         loop {
             match rx.recv() {
                 Ok(Ok(event)) => {
@@ -209,76 +220,99 @@ impl FileIndexer {
                 }
             }
         }
+    }
 
-        Ok(())
+    fn print_status(&self){
+        let file_count = self.watched_files.len();
+        let dir_count = self.watched_dirs.len();
+        
+        if file_count > 0 {
+            println!("File watcher started. Monitoring {} specific files.", file_count);
+        }
+        if dir_count > 0 {
+            println!("File watcher started. Monitoring {} directories{}.", 
+                dir_count, 
+                if self.code_files_only { " (code files only)" } else { "" }
+            );
+        }
     }
 
     fn handle_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
         match event.kind {
             EventKind::Modify(notify::event::ModifyKind::Data(_)) => {
-                for path in event.paths {
-                    if self.should_index(&path) {
-                        if let Err(e) = self.index_file(&path) {
-                            eprintln!("Failed to index {}: {}", path.display(), e);
-                        }
-                    }
-                }
+                self.index_files(event);
             }
             EventKind::Create(_) => {
-                for path in event.paths {
-                    if path.is_file() && self.should_index(&path) {
-                        if let Err(e) = self.handle_file_creation(&path) {
-                            eprintln!("Failed to handle creation of {}: {}", path.display(), e);
-                        }
-                    }
-                }
+                self.create_files(event);
             }
             EventKind::Remove(_) => {
-                for path in event.paths {
-                    let would_be_indexed = if !self.watched_files.is_empty() {
-                        self.watched_files.contains(&path)
-                    } else if !self.watched_dirs.is_empty() {
-                        self.watched_dirs.iter().any(|dir| path.starts_with(dir))
-                    } else {
-                        false
-                    };
-
-                    if would_be_indexed && self.is_code_file(&path) {
-                        if let Err(e) = self.handle_file_deletion(&path) {
-                            eprintln!("Failed to handle deletion of {}: {}", path.display(), e);
-                        }
-                    }
-                }
+                self.remove_files(event);
             }
             EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                for path in event.paths {
-                    if path.exists() {
-                        if self.should_index(&path) {
-                            if let Err(e) = self.handle_file_creation(&path) {
-                                eprintln!("Failed to handle rename/move to {}: {}", path.display(), e);
-                            }
-                        }
-                    } else {
-                        let would_be_indexed = if !self.watched_files.is_empty() {
-                            self.watched_files.contains(&path)
-                        } else if !self.watched_dirs.is_empty() {
-                            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
-                        } else {
-                            false
-                        };
-
-                        if would_be_indexed && self.is_code_file(&path) {
-                            if let Err(e) = self.handle_file_deletion(&path) {
-                                eprintln!("Failed to handle rename/move from {}: {}", path.display(), e);
-                            }
-                        }
-                    }
-                }
+                self.modify_files(event);
             }
-            _ => {
-                // Ignore other events
-            }
+            _ => {}
         }
         Ok(())
     }
+    
+    fn index_files(&mut self, event: Event){
+        for path in event.paths {
+            if self.should_index(&path) {
+                if let Err(e) = self.index_file(&path) {
+                    eprintln!("Failed to index {}: {}", path.display(), e);
+                }                
+            }               
+        }
+    }
+
+    fn create_files(&mut self, event: Event){
+        for path in event.paths {
+            if path.is_file() && self.should_index(&path) {
+                if let Err(e) = self.handle_file_creation(&path) {
+                     eprintln!("Failed to handle creation of {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
+    fn remove_files(&mut self, event: Event){
+        for path in event.paths {
+            if self.would_be_indexed(&path) && self.is_code_file(&path) {
+                if let Err(e) = self.handle_file_deletion(&path) {
+                    eprintln!("Failed to handle deletion of {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
+    fn modify_files(&mut self, event: Event){
+        for path in event.paths {
+            if path.exists() {
+                if self.should_index(&path) {
+                    if let Err(e) = self.handle_file_creation(&path) {
+                        eprintln!("Failed to handle rename/move to {}: {}", path.display(), e);
+                    }
+                }
+            } else {
+                if self.would_be_indexed(&path) && self.is_code_file(&path) {
+                    if let Err(e) = self.handle_file_deletion(&path) {
+                        eprintln!("Failed to handle rename/move from {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+    }
+
+    fn would_be_indexed(&mut self, path: &PathBuf) -> bool{
+        let would_be_indexed = if !self.watched_files.is_empty() {
+            self.watched_files.contains(path)
+        } else if !self.watched_dirs.is_empty() {
+            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
+         } else {
+            false
+        };
+        would_be_indexed
+    }
+
 }
