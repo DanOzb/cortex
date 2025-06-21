@@ -1,133 +1,40 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::sync::mpsc::{channel, Receiver};
+use std::vec;
+
+use crate::debouncer::Debouncer;
+use crate::extension_filter::ExtensionFilter;
+use crate::ignore_matcher::IgnoreMatcher;
+use crate::index_decider::{IndexDecider};
 
 
 pub struct FileIndexer {
     watched_files: HashSet<PathBuf>,
     watched_dirs: HashSet<PathBuf>,
-    debounce_duration: Duration,
-    last_index_time: Option<Instant>,
-    code_extensions: HashSet<String>,
-    code_files_only: bool,
+    index_decider: IndexDecider,
 }
 
 impl FileIndexer {
-    pub fn new(debounce_ms: u64) -> Self {
-        let mut code_extensions = HashSet::new();
-        for ext in [
-            "rs", "py", "js", "ts", "jsx", "tsx", "go", "c", "cpp", "cc", "cxx", "h", "hpp",
-            "java", "kt", "scala", "cs", "php", "rb", "swift", "dart", "r", "m", "mm",
-            "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "html", "htm", "xml",
-            "css", "scss", "sass", "less", "json", "yaml", "yml", "toml", "ini", "cfg",
-            "conf", "proto", "graphql", "gql", "vue", "svelte", "elm", "hs", "ml", "fs",
-            "clj", "cljs", "ex", "exs", "erl", "pl", "pm", "t", "lua", "vim", "md", "tex"
-        ] {
-            code_extensions.insert(ext.to_string());
-        }
+    pub fn from_root_project<P: AsRef<Path>>(root: P) -> Self {
+        let file_extensions = vec![
+            "sh", "c", "cpp", "cc", "cxx", "h", "hpp", "css", "d", "ex", "exs", "erl", "hrl", "go", 
+            "hs", "html", "htm", "java", "js", "mjs", "cjs", "json", "lua", "md", "markdown", "pl", "pm", "py", 
+            "rb", "rs", "toml", "ts", "tsx", "jsx", "vim", "yaml", "yml"
+            ];
+
+        let matcher = IgnoreMatcher::from_root_project(root, Vec::new()); 
+        let filter = ExtensionFilter::new(file_extensions); 
+        let debouncer = Debouncer::new(3, 0); 
+        let decider = IndexDecider::new(matcher, filter, debouncer);
 
         Self {
             watched_files: HashSet::new(),
             watched_dirs: HashSet::new(),
-            debounce_duration: Duration::from_millis(debounce_ms),
-            last_index_time: None,
-            code_extensions,
-            code_files_only: false,
+            index_decider: decider,
         }
-    }
-
-    pub fn code_files_only(mut self) -> Self {
-        self.code_files_only = true;
-        self
-    }
-
-    pub fn add_extension(&mut self, ext: &str) {
-        self.code_extensions.insert(ext.to_lowercase());
-    }
-
-    pub fn add_extensions<I>(&mut self, extensions: I) 
-        where 
-            I: IntoIterator<Item = String>,
-        {
-            for ext in extensions {
-                self.code_extensions.insert(ext.to_lowercase());
-            }
-        }
-
-    pub fn watch_directory<P: AsRef<Path>>(&mut self, path: P) {
-        self.watched_dirs.insert(path.as_ref().to_path_buf());
-    }
-
-    pub fn watch_directories<I, P>(&mut self, paths: I) 
-    where 
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        for path in paths {
-            self.watch_directory(path);
-        }
-    }
-
-    pub fn add_file<P: AsRef<Path>>(&mut self, path: P) {
-        self.watched_files.insert(path.as_ref().to_path_buf());
-    }
-
-    pub fn add_files<I, P>(&mut self, paths: I) 
-    where 
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        for path in paths {
-            self.add_file(path);
-        }
-    }
-
-    fn is_code_file(&self, path: &Path) -> bool {
-        if !self.code_files_only {
-            return true; 
-        }
-
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| self.code_extensions.contains(&ext.to_lowercase()))
-            .unwrap_or(false)
-    }
-
-    fn should_index(&mut self, path: &Path) -> bool {
-        if !self.is_watched(path){
-            return false;
-        }
-
-        if !self.is_code_file(path) {
-            return false;
-        }
-        self.should_debounce()
-    }
-
-    fn should_debounce(&mut self) -> bool{
-        let now = Instant::now();
-        if let Some(last_time) = self.last_index_time {
-            if now.duration_since(last_time) < self.debounce_duration {
-                return false;
-            }
-        }
-
-        self.last_index_time = Some(now);
-        true
-    }
-
-    fn is_watched(&self, path: &Path) -> bool {
-        let is_watched = if !self.watched_files.is_empty() {
-            self.watched_files.contains(path)
-        } else if !self.watched_dirs.is_empty() {
-            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
-        } else {
-            false
-        };
-
-        is_watched
     }
 
     fn index_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -145,10 +52,10 @@ impl FileIndexer {
         Ok(())
     }
 
-    fn handle_file_creation(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn handle_file_creation(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("File created: {}", path.display());
         
-        if self.is_code_file(path) {
+        if self.index_decider.should_index(path) {
             self.index_file(path)?;
         }
         
@@ -230,9 +137,8 @@ impl FileIndexer {
             println!("File watcher started. Monitoring {} specific files.", file_count);
         }
         if dir_count > 0 {
-            println!("File watcher started. Monitoring {} directories{}.", 
-                dir_count, 
-                if self.code_files_only { " (code files only)" } else { "" }
+            println!("File watcher started. Monitoring directories {}.", 
+                dir_count
             );
         }
     }
@@ -258,7 +164,7 @@ impl FileIndexer {
     
     fn index_files(&mut self, event: Event){
         for path in event.paths {
-            if self.should_index(&path) {
+            if self.index_decider.should_index(&path) {
                 if let Err(e) = self.index_file(&path) {
                     eprintln!("Failed to index {}: {}", path.display(), e);
                 }                
@@ -268,7 +174,7 @@ impl FileIndexer {
 
     fn create_files(&mut self, event: Event){
         for path in event.paths {
-            if path.is_file() && self.should_index(&path) {
+            if path.is_file() && self.index_decider.should_index(&path) {
                 if let Err(e) = self.handle_file_creation(&path) {
                      eprintln!("Failed to handle creation of {}: {}", path.display(), e);
                 }
@@ -278,10 +184,8 @@ impl FileIndexer {
 
     fn remove_files(&mut self, event: Event){
         for path in event.paths {
-            if self.would_be_indexed(&path) && self.is_code_file(&path) {
-                if let Err(e) = self.handle_file_deletion(&path) {
+            if let Err(e) = self.handle_file_deletion(&path) {
                     eprintln!("Failed to handle deletion of {}: {}", path.display(), e);
-                }
             }
         }
     }
@@ -289,30 +193,19 @@ impl FileIndexer {
     fn modify_files(&mut self, event: Event){
         for path in event.paths {
             if path.exists() {
-                if self.should_index(&path) {
+                if self.index_decider.should_index(&path) {
                     if let Err(e) = self.handle_file_creation(&path) {
                         eprintln!("Failed to handle rename/move to {}: {}", path.display(), e);
                     }
                 }
             } else {
-                if self.would_be_indexed(&path) && self.is_code_file(&path) {
+                if self.index_decider.should_index(&path) {
                     if let Err(e) = self.handle_file_deletion(&path) {
                         eprintln!("Failed to handle rename/move from {}: {}", path.display(), e);
                     }
                 }
             }
         }
-    }
-
-    fn would_be_indexed(&mut self, path: &PathBuf) -> bool{
-        let would_be_indexed = if !self.watched_files.is_empty() {
-            self.watched_files.contains(path)
-        } else if !self.watched_dirs.is_empty() {
-            self.watched_dirs.iter().any(|dir| path.starts_with(dir))
-         } else {
-            false
-        };
-        would_be_indexed
     }
 
 }
