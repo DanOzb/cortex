@@ -53,4 +53,19 @@ impl Debouncer {
             }
         }
     }
+
+    pub fn time_left<P: AsRef<Path>>(&self, path: P) -> Duration {
+    match self.index_times.get(path.as_ref()) {
+        Some(last_time) => {
+            let elapsed = last_time.elapsed();
+            if elapsed >= self.debounce_duration {
+                Duration::ZERO
+            } else {
+                self.debounce_duration - elapsed
+            }
+        }
+        None => self.debounce_duration,
+    }
+}
+
 }

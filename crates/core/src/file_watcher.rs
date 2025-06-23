@@ -8,12 +8,12 @@ use std::vec;
 use crate::debouncer::Debouncer;
 use crate::extension_filter::ExtensionFilter;
 use crate::ignore_matcher::IgnoreMatcher;
-use crate::index_decider::{IndexDecider};
+use crate::index_decider:: IndexDecider;
 
 
 pub struct FileIndexer {
-    watched_files: HashSet<PathBuf>,
-    watched_dirs: HashSet<PathBuf>,
+    root_path: PathBuf,
+    indexed_files: HashSet<PathBuf>,
     index_decider: IndexDecider,
 }
 
@@ -25,14 +25,14 @@ impl FileIndexer {
             "rb", "rs", "toml", "ts", "tsx", "jsx", "vim", "yaml", "yml"
             ];
 
-        let matcher = IgnoreMatcher::from_root_project(root, Vec::new()); 
+        let matcher = IgnoreMatcher::from_root_project(&root, Vec::new()); 
         let filter = ExtensionFilter::new(file_extensions); 
-        let debouncer = Debouncer::new(3, 0); 
+        let debouncer = Debouncer::new(10, 0); 
         let decider = IndexDecider::new(matcher, filter, debouncer);
 
         Self {
-            watched_files: HashSet::new(),
-            watched_dirs: HashSet::new(),
+            root_path: root.as_ref().to_path_buf(),
+            indexed_files: HashSet::new(),
             index_decider: decider,
         }
     }
@@ -52,7 +52,7 @@ impl FileIndexer {
         Ok(())
     }
 
-    fn handle_file_creation(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn create_file(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("File created: {}", path.display());
         
         if self.index_decider.should_index(path) {
@@ -62,7 +62,7 @@ impl FileIndexer {
         Ok(())
     }
 
-    fn handle_file_deletion(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn delete_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("File deleted: {}", path.display());
         
         // Later: remove logic here
@@ -72,27 +72,60 @@ impl FileIndexer {
 
     pub fn start_watching(&mut self) -> Result<(), Box<dyn std::error::Error>> {
 
-        let dirs_to_watch = self.setup_dirs_to_watch();
-        let (_watcher, rx) = self.setup_watcher(&dirs_to_watch)?;
-    
+        let root = &self.root_path.clone();
+        
+        self.initial_index(root)?;
+
+        let (_watcher, rx) = self.setup_watcher()?;
+        
         self.print_status();
         self.program_loop(&rx);
 
         Ok(())
     }
 
-    fn setup_dirs_to_watch(&self) -> HashSet<PathBuf>{
-        let mut dirs_to_watch = self.watched_dirs.clone();
-        for file_path in &self.watched_files {
-            if let Some(parent) = file_path.parent() {
-                dirs_to_watch.insert(parent.to_path_buf());
-            }
-        }
-       
-        dirs_to_watch
+    fn initial_index(&mut self, root: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Starting initial indexing of: {}", self.root_path.display());
+        
+        self.walk_directory(root)?;
+        
+        println!("Initial indexing complete. Indexed {} files.", self.indexed_files.len());
+        Ok(())
     }
 
-    fn setup_watcher(&self, dirs_to_watch: &HashSet<PathBuf>) -> Result<(RecommendedWatcher, Receiver<Result<Event, notify::Error>>), Box<dyn std::error::Error>> {
+    fn walk_directory(&mut self, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+
+        let entries = std::fs::read_dir(dir)?;
+        
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_file() {
+                if self.index_decider.should_index(&path) {
+                    match self.index_file(&path) {
+                        Ok(()) => {
+                            let canonized_path = path.canonicalize()?;
+                            self.indexed_files.insert(canonized_path.clone());
+                            println!("Successfully indexed and tracked: {}", canonized_path.display());
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to index {}: {}", path.display(), e);
+                        }
+                    }
+                }
+            } else if path.is_dir() {
+                self.walk_directory(&path)?;
+            }
+        }
+              
+        Ok(())   
+    }
+
+    fn setup_watcher(&self) -> Result<(RecommendedWatcher, Receiver<Result<Event, notify::Error>>), Box<dyn std::error::Error>> {
         let (tx, rx) = channel();
         
         let mut watcher = RecommendedWatcher::new(
@@ -100,14 +133,8 @@ impl FileIndexer {
             Config::default().with_poll_interval(Duration::from_millis(100))
         )?;
 
-        if dirs_to_watch.is_empty() {
-            return Err("No files or directories to watch".into());
-        }
-
-        for dir in dirs_to_watch {
-            println!("Watching directory: {}", dir.display());
-            watcher.watch(dir, RecursiveMode::Recursive)?;
-        }
+        println!("Setting up recursive watch on: {}", self.root_path.display());
+        watcher.watch(&self.root_path, RecursiveMode::Recursive)?;
 
         Ok((watcher, rx))
     }
@@ -128,79 +155,84 @@ impl FileIndexer {
             }
         }
     }
-
+    
     fn print_status(&self){
-        let file_count = self.watched_files.len();
-        let dir_count = self.watched_dirs.len();
+        let file_count = self.indexed_files.len();
         
         if file_count > 0 {
             println!("File watcher started. Monitoring {} specific files.", file_count);
-        }
-        if dir_count > 0 {
-            println!("File watcher started. Monitoring directories {}.", 
-                dir_count
-            );
         }
     }
 
     fn handle_event(&mut self, event: Event) -> Result<(), Box<dyn std::error::Error>> {
         match event.kind {
-            EventKind::Modify(notify::event::ModifyKind::Data(_)) => {
-                self.index_files(event);
+                        EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
+                self.handle_file_rename(event);
             }
+            EventKind::Modify(notify::event::ModifyKind::Data(_))
+            |EventKind::Modify(notify::event::ModifyKind::Other)
+            |EventKind::Modify(notify::event::ModifyKind::Any)  => {
+                self.handle_file_modification(event);
+            }
+    
             EventKind::Create(_) => {
-                self.create_files(event);
+                self.handle_file_creation(event);
             }
             EventKind::Remove(_) => {
-                self.remove_files(event);
+                self.handle_file_deletion(event);
             }
-            EventKind::Modify(notify::event::ModifyKind::Name(_)) => {
-                self.modify_files(event);
+
+            _ => {
+                println!("Unhandled event type {:?}", event.kind);
             }
-            _ => {}
         }
         Ok(())
     }
     
-    fn index_files(&mut self, event: Event){
+    fn handle_file_modification(&mut self, event: Event){
         for path in event.paths {
-            if self.index_decider.should_index(&path) {
-                if let Err(e) = self.index_file(&path) {
-                    eprintln!("Failed to index {}: {}", path.display(), e);
-                }                
-            }               
-        }
+            let canonicolized_path = &path.canonicalize().unwrap();
+            if self.indexed_files.contains(canonicolized_path) {
+                if self.index_decider.should_index(canonicolized_path){
+                    if let Err(e) = self.index_file(&canonicolized_path) {
+                        eprintln!("Failed to index {}: {}", path.display(), e);
+                    }
+                } else {
+                    println!("Debouncer time left {:?}", self.index_decider.debounce_duration_left(canonicolized_path))
+                }            
+            }      
+        }   
     }
-
-    fn create_files(&mut self, event: Event){
+    
+    fn handle_file_creation(&mut self, event: Event){
         for path in event.paths {
             if path.is_file() && self.index_decider.should_index(&path) {
-                if let Err(e) = self.handle_file_creation(&path) {
+                if let Err(e) = self.create_file(&path) {
                      eprintln!("Failed to handle creation of {}: {}", path.display(), e);
                 }
             }
         }
     }
 
-    fn remove_files(&mut self, event: Event){
+    fn handle_file_deletion(&mut self, event: Event){
         for path in event.paths {
-            if let Err(e) = self.handle_file_deletion(&path) {
+            if let Err(e) = self.delete_file(&path) {
                     eprintln!("Failed to handle deletion of {}: {}", path.display(), e);
             }
         }
     }
 
-    fn modify_files(&mut self, event: Event){
+    fn handle_file_rename(&mut self, event: Event){
         for path in event.paths {
             if path.exists() {
                 if self.index_decider.should_index(&path) {
-                    if let Err(e) = self.handle_file_creation(&path) {
+                    if let Err(e) = self.create_file(&path) {
                         eprintln!("Failed to handle rename/move to {}: {}", path.display(), e);
                     }
                 }
             } else {
                 if self.index_decider.should_index(&path) {
-                    if let Err(e) = self.handle_file_deletion(&path) {
+                    if let Err(e) = self.delete_file(&path) {
                         eprintln!("Failed to handle rename/move from {}: {}", path.display(), e);
                     }
                 }

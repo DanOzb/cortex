@@ -1,4 +1,5 @@
 use std::path::{Path};
+use std::time::Duration;
 use crate::ignore_matcher::IgnoreMatcher; 
 use crate::debouncer::Debouncer;
 use crate::extension_filter::ExtensionFilter;
@@ -22,5 +23,9 @@ impl IndexDecider {
         !self.ignore_matcher.is_ignored(path.as_ref()) 
         && self.extension_filter.is_supported(path.as_ref()) 
         && self.debouncer.should_index(path.as_ref())
+    }
+
+    pub fn debounce_duration_left<P: AsRef<Path>>(&self, path: P) -> Duration{
+        self.debouncer.time_left(path)
     }
 }
