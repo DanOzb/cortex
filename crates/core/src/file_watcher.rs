@@ -1,20 +1,23 @@
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::sync::mpsc::{channel, Receiver};
 use std::vec;
 
+use crate::parser::registry::LanguageParserRegistry;
+use crate::parser::event::FileEvents;
 use crate::debouncer::Debouncer;
 use crate::extension_filter::ExtensionFilter;
 use crate::ignore_matcher::IgnoreMatcher;
 use crate::index_decider:: IndexDecider;
 
-
 pub struct FileIndexer {
     root_path: PathBuf,
     indexed_files: HashSet<PathBuf>,
     index_decider: IndexDecider,
+    parser_registry: LanguageParserRegistry,
+    file_indices: HashMap<PathBuf, FileEvents>,
 }
 
 impl FileIndexer {
@@ -34,10 +37,12 @@ impl FileIndexer {
             root_path: root.as_ref().to_path_buf(),
             indexed_files: HashSet::new(),
             index_decider: decider,
+            parser_registry: LanguageParserRegistry::new(),
+            file_indices: HashMap::new(),
         }
     }
 
-    fn index_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn index_file(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("Indexing file: {}", path.display());
         
         if !path.exists() {
@@ -45,10 +50,16 @@ impl FileIndexer {
             return Ok(());
         }
 
-        let _ = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path)?;
 
-        //Later: Use Tree Sitter to parse file
-        
+        if let Some(file_events) = self.parser_registry.parse_file(path, &content)? {
+
+            //SQL queries
+            
+            return Err("File extension not supported".into());
+        } else {
+            println!("  - No parser available for this file type");
+        }
         Ok(())
     }
 
