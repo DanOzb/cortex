@@ -6,7 +6,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::vec;
 
 use crate::parser::registry::LanguageParserRegistry;
-use crate::parser::event::FileEvents;
+use crate::parser::event::{FileEvents, ParseEvent};
 use crate::debouncer::Debouncer;
 use crate::extension_filter::ExtensionFilter;
 use crate::ignore_matcher::IgnoreMatcher;
@@ -17,7 +17,7 @@ pub struct FileIndexer {
     indexed_files: HashSet<PathBuf>,
     index_decider: IndexDecider,
     parser_registry: LanguageParserRegistry,
-    file_indices: HashMap<PathBuf, FileEvents>,
+    all_file_events: HashMap<PathBuf, FileEvents>,
 }
 
 impl FileIndexer {
@@ -38,7 +38,7 @@ impl FileIndexer {
             indexed_files: HashSet::new(),
             index_decider: decider,
             parser_registry: LanguageParserRegistry::new(),
-            file_indices: HashMap::new(),
+            all_file_events: HashMap::new(),
         }
     }
 
@@ -53,7 +53,10 @@ impl FileIndexer {
         let content = std::fs::read_to_string(path)?;
 
         if let Some(file_events) = self.parser_registry.parse_file(path, &content)? {
-
+            for func in file_events.functions(){ //throwaway
+                println!("Functions Definition: {:?}, ", func);
+            }
+            println!();
             //SQL queries
             
             return Err("File extension not supported".into());

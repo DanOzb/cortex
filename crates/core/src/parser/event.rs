@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub enum ParseEvent {
-    // === Core Declarations ===
     FunctionDefinition {
         name: String,
         start_line: usize,
@@ -30,15 +29,14 @@ pub enum ParseEvent {
     
     ImportStatement {
         module: String,
-        items: Vec<String>, // empty for wildcard imports
+        items: Vec<String>, 
         line: usize,
         is_wildcard: bool,
     },
     
-    // === Control Flow ===
     ConditionalBlock {
         condition_type: String, // "if", "elif", "else", "match", "switch"
-        condition_summary: Option<String>, // None for "else"
+        condition_summary: Option<String>,
         start_line: usize,
         end_line: usize,
     },
@@ -58,19 +56,18 @@ pub enum ParseEvent {
         has_finally: bool,
     },
     
-    // === Relationships ===
     FunctionCall {
-        caller_function: Option<String>, // None if at module level
+        caller_function: Option<String>, 
         callee: String,
         line: usize,
-        arguments: Vec<String>, // simplified argument representations
+        arguments: Vec<String>, 
     },
     
     VariableAccess {
         variable: String,
         access_type: AccessType,
         line: usize,
-        context: Option<String>, // function/class where it's accessed
+        context: Option<String>, 
     },
     
     ClassInheritance {
@@ -81,7 +78,7 @@ pub enum ParseEvent {
     
     // Python
     PythonDecorator {
-        target: String, // function/class name
+        target: String, 
         decorator: String,
         line: usize,
     },
@@ -104,9 +101,8 @@ pub enum ParseEvent {
         line: usize,
     },
     
-    // === Comments and Documentation ===
     DocComment {
-        target: String, // what this documents
+        target: String, 
         content: String,
         line: usize,
         doc_type: DocType,
@@ -166,7 +162,6 @@ impl FileEvents {
         self.events.push(event);
     }
     
-    // Convenience methods for querying events
     pub fn functions(&self) -> impl Iterator<Item = &ParseEvent> {
         self.events.iter().filter(|e| matches!(e, ParseEvent::FunctionDefinition { .. }))
     }

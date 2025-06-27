@@ -12,6 +12,6 @@ mod parser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>>{
     //simple check if it works
-    let mut indexer = FileIndexer::from_root_project(r"C:\Users\eneso\Desktop\ripgrep");
+    let mut indexer = FileIndexer::from_root_project(r"");
     indexer.start_watching() 
 }   
