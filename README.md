@@ -7,9 +7,7 @@
 
 ## Status
 
-This project is in active early development.  
-The current focus is on building the **file watcher** and **indexing engine** in Rust.
-
+This project is paused.
 
 
 
